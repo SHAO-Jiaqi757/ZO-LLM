@@ -15,7 +15,7 @@ def select_clients(fed_args, weights=None):
         get_sampler(fed_args)
     num_clients = fed_args.num_clients
     sample_clients = fed_args.sample_clients
-    return np.random.choice(num_clients, sample_clients, replace=False, p=weights)
+    return random.choices(range(num_clients), k=sample_clients, weights=weights)
    
 
 def global_aggregation(fed_args, framework, local_dict_list, sampled_clients, num_samples, total_samples, round):
@@ -25,6 +25,7 @@ def global_aggregation(fed_args, framework, local_dict_list, sampled_clients, nu
             model_dict[key] = sum([local_dict_list[client_id][key] * num_samples[client_id] / total_samples for client_id in sampled_clients])
         framework.set_model_dict(model_dict)
         logging.info(f"Round {round+1} global aggregation done.")
+        return model_dict
     else:
         raise NotImplementedError(f"Aggregation method {fed_args.fed_alg} is not implemented.")
     
@@ -57,6 +58,7 @@ def train_client(args, framework, client_id, current_round, local_dataset, local
             if args.trainer != "none":
                 # Here the training samples are seperated
                 if args.num_dev is not None:
+                    logging.info(f"args.num_dev is not None: {args.num_dev}") 
                     # Dev samples
                     # assert args.num_dev + args.num_train <= len(train_samples), f"num_dev({args.num_dev})+num_train({args.num_train}) is more than actual num of training samples ({len(train_samples)})."
                     dev_samples = train_samples[-args.num_dev:]

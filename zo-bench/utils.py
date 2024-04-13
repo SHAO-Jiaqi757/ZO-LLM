@@ -104,6 +104,7 @@ class OurArguments(TrainingArguments):
         "SST2"  # task name should match the string before Dataset in the Dataset class name. We support the following task_name: SST2, RTE, CB, BoolQ, WSC, WIC, MultiRC, Copa, ReCoRD, SQuAD, DROP
     )
 
+
     # Number of examples
     num_train: int = (
         0  # ICL mode: number of demonstrations; training mode: number of training samples
@@ -772,7 +773,8 @@ class Framework:
             last_checkpoint = self.args.resume_from_checkpoint
 
         # This calls the trainer._inner_training_loop()
-        trainer.train(resume_from_checkpoint=last_checkpoint)
+        logging.debug("last_checkpoint: %s" % last_checkpoint)
+        trainer.train(resume_from_checkpoint=last_checkpoint) # todo: fix for each client
 
         # Explicitly save the model
         if self.args.save_model:

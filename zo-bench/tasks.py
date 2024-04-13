@@ -25,11 +25,12 @@ def get_task(task_name):
     instance = class_(subtask)
     return instance
 
-def get_local_datasets(task_name, fed_args, seed) -> List[DatasetDict]:
+def get_local_datasets(task_name, fed_args, args) -> List[DatasetDict]:
     """
     Get local datasets for a given task.
     Returns a list of DatasetDict objects, each containing train and validation datasets.
     """        
+    seed = args.train_set_seed
     local_datasets : List[DatasetDict] = []
     if task_name.lower() == "sst2":
         dataset = load_dataset('glue', 'sst2')
@@ -37,12 +38,12 @@ def get_local_datasets(task_name, fed_args, seed) -> List[DatasetDict]:
         valset = dataset['validation']
         # testset = dataset['test']
 
-        local_train_datasets = split_dataset(fed_args, seed, trainset)
-        local_val_datasets = split_dataset(fed_args, seed, valset)
+        local_train_datasets, local_train_num_samples = split_dataset(fed_args, seed, trainset)
+        local_val_datasets, local_val_num_samples = split_dataset(fed_args, seed, valset)
 
         for i in range(fed_args.num_clients):
             local_datasets.append(SST2Dataset(DatasetDict({'train': local_train_datasets[i], 'validation': local_val_datasets[i]}), subtask=task_name))
-        return local_datasets
+        return local_datasets, local_train_num_samples, local_val_num_samples
 
 def get_local_trainsets(local_datasets, args):
     """
