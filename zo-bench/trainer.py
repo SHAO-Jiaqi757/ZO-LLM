@@ -19,7 +19,6 @@ The Trainer class, to easily train a 🤗 Transformers from scratch or finetune 
 import inspect
 import math
 import os
-import pickle
 import shutil
 import sys
 import time
@@ -527,10 +526,6 @@ class OurTrainer(Trainer):
                     self.state.global_step += 1
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
                     self.control = self.callback_handler.on_step_end(args, self.state, self.control)
-                    # save self.state to test.pkl
-                    with open("test.pkl", "wb") as f:
-                        pickle.dump(self.state, f)
-                        
                     self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
 
                 else:
@@ -653,7 +648,7 @@ class OurTrainer(Trainer):
                     gradients = xm._fetch_gradients(self.optimizer)
                     xm.all_reduce("sum", gradients, scale=1.0 / xm.xrt_world_size())
                 # AMP: gradients need unscaling
-                self.scaler.unscale_(self.optimizer) # TODO: fix bug raise ValueError("Attempting to unscale FP16 gradients.")
+                self.scaler.unscale_(self.optimizer)
 
             if is_sagemaker_mp_enabled() and args.fp16:
                 self.optimizer.clip_master_grads(args.max_grad_norm)
