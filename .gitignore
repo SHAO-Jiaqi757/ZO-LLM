@@ -1,7 +1,6 @@
 models
 wandb
 __pycache__
-environment.yml
 LICENSE
 *.md
 *.txt
