@@ -27,8 +27,8 @@ def test_split_dataset_iid():
     fed_args = type("FedArgs", (), {"split_strategy": "iid", "num_clients": 4})
     script_args = type("ScriptArgs", (), {"seed": 42})
     dataset = DummyDataset(100)
-
-    local_datasets = split_dataset(fed_args, script_args, dataset)
+    dataset = dataset.select(range(20))
+    local_datasets, _ = split_dataset(fed_args, script_args, dataset)
 
     assert len(local_datasets) == 4
     assert sum(len(local_dataset) for local_dataset in local_datasets) == len(dataset)
@@ -38,8 +38,9 @@ def test_split_dataset_noniid():
     fed_args = type("FedArgs", (), {"split_strategy": "noniid", "num_clients": 3, "alpha": 0.5})
     script_args = type("ScriptArgs", (), {"seed": 42})
     dataset = DummyDataset(100)
+    dataset = dataset[:20]
 
-    local_datasets = split_dataset(fed_args, script_args, dataset)
+    local_datasets, _ = split_dataset(fed_args, script_args, dataset)
 
     assert len(local_datasets) == 3
     print([len(local_dataset) for local_dataset in local_datasets])
@@ -49,7 +50,7 @@ def test_split_dataset_noniid_with_min_partition_size():
     script_args = type("ScriptArgs", (), {"seed": 42})
     dataset = DummyDataset(100)
 
-    local_datasets = split_dataset(fed_args, script_args, dataset)
+    local_datasets, _ = split_dataset(fed_args, script_args, dataset)
 
     assert len(local_datasets) == 5
     print([len(local_dataset) for local_dataset in local_datasets])

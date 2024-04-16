@@ -3,3 +3,4 @@ tests
 wandb
 models
 sweeps
+federated_learning

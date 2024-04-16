@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import json
 import logging
 import signal
@@ -7,8 +8,9 @@ from collections.abc import Mapping
 from dataclasses import is_dataclass, asdict
 from typing import Any, Dict, List, NewType, Optional, Union
 import argparse
-import os
+import os, wandb
 import random
+from src.datatypes import NamedParametersToOptimize
 
 from torch.distributed.fsdp.fully_sharded_data_parallel import (
     FullyShardedDataParallel as FSDP,
@@ -48,7 +50,15 @@ logger = logging.getLogger(__name__)
 @dataclass
 class FedArguments:
     fed_alg: Optional[str] = field(
-        default="fedavg", metadata={"help": "the algorithm to use"}
+        default=None, metadata={"help": "the algorithm to use"}
+    )
+    global_eval: Optional[bool] = field(
+        default=True,
+        metadata={"help": "whether to use global evaluation for each round"},
+    )
+    g_result_file: Optional[str] = field(
+        default=None,
+        metadata={"help": "the file to save the global evaluation results"},
     )
     num_rounds: Optional[int] = field(
         default=500, metadata={"help": "the number of rounds"}
@@ -104,7 +114,8 @@ class OurArguments(TrainingArguments):
         "SST2"  # task name should match the string before Dataset in the Dataset class name. We support the following task_name: SST2, RTE, CB, BoolQ, WSC, WIC, MultiRC, Copa, ReCoRD, SQuAD, DROP
     )
 
-
+    dp_eps: float = 0.1  # epsilon in differential privacy
+    
     # Number of examples
     num_train: int = (
         0  # ICL mode: number of demonstrations; training mode: number of training samples
@@ -147,6 +158,7 @@ class OurArguments(TrainingArguments):
     ## - zo_adam: zeroth-order Adam training
     ## - zo_sign_opt: zeroth-order sign sgd training
     ## - forward_grad: forward gradient
+    ## - zo_dp: zeroth-order DP training
     optimizer: str = "adamw"
     ## options
     ## - sgd
@@ -242,12 +254,110 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
+class HFDataset(Dataset):
+
+    def __init__(self, data):
+        self.data = data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+def convert_(framework, samples):
+    """
+    Convert samples to HF-compatible dataset
+    """
+    data = []
+    for sample in samples:
+        encoded_candidates, option_lens = encode_prompt(
+            framework.task,
+            framework.task.get_template(template_version=framework.args.template_ver),
+            [],
+            sample,
+            framework.tokenizer,
+            max_length=framework.args.max_length,
+            generation=framework.task.generation,
+            generation_with_gold=True,
+            max_new_tokens=framework.args.max_new_tokens,
+        )
+        if framework.task.generation:
+            correct_candidate_id = 0
+        elif isinstance(sample.correct_candidate, list):
+            correct_candidate_id = sample.candidates.index(
+                sample.correct_candidate[0]
+            )
+        else:
+            correct_candidate_id = sample.candidates.index(
+                sample.correct_candidate
+            )
+
+        if framework.args.non_diff:
+            # For non-differentiable objective, there is no teacher forcing thus the
+            # current answer part is removed
+            encoded_candidates[correct_candidate_id] = encoded_candidates[
+                correct_candidate_id
+            ][: -option_lens[correct_candidate_id]]
+
+        if framework.args.train_as_classification:
+            # For classification, we provide the label as the correct candidate id
+            data.append(
+                [
+                    {
+                        "input_ids": encoded_candidates[_i],
+                        "labels": correct_candidate_id,
+                        "option_len": option_lens[_i],
+                        "num_options": len(sample.candidates),
+                    }
+                    for _i in range(len(encoded_candidates))
+                ]
+            )
+        elif framework.args.only_train_option:
+            # Otherwise, it is just LM-style teacher forcing
+            if framework.args.non_diff:
+                # For non-differentiable objective, we need to provide the gold answer to calculate F1/acc
+                data.append(
+                    {
+                        "input_ids": encoded_candidates[correct_candidate_id],
+                        "labels": encoded_candidates[correct_candidate_id],
+                        "option_len": option_lens[correct_candidate_id],
+                        "gold": sample.correct_candidate,
+                    }
+                )
+            else:
+                data.append(
+                    {
+                        "input_ids": encoded_candidates[correct_candidate_id],
+                        "labels": encoded_candidates[correct_candidate_id],
+                        "option_len": option_lens[correct_candidate_id],
+                    }
+                )
+        else:
+            data.append(
+                {
+                    "input_ids": encoded_candidates[correct_candidate_id],
+                    "labels": encoded_candidates[correct_candidate_id],
+                }
+            )
+    return data
+
 class Framework:
 
-    def __init__(self, args, task):
+    def __init__(self, args, task, fed_args=None):
         self.args = args
         self.task = task
+        self.fed_args = fed_args
         self.model, self.tokenizer = self.load_model()
+        self.names_to_optm = self.get_names_to_optm()
+    
+    def get_names_to_optm(self):
+        opt_names = []
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                opt_names.append(name)
+        return opt_names
+
 
     def load_model(self):
         """
@@ -409,17 +519,25 @@ class Framework:
         Set the model parameters to the given named_parameters_to_optm
         """
         state_dict = self.model.state_dict()
-        for name, param in named_parameters_to_optm.items():
-            state_dict[name].copy_(param)
+        for name in self.names_to_optm:
+            state_dict[name].copy_(named_parameters_to_optm[name])
         self.model.load_state_dict(state_dict)
 
-    def get_named_parameters_to_optm(self):
-        self.named_parameters_to_optm = {}
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.named_parameters_to_optm[name] = param
-                param.grad = None
+    def get_named_parameters_to_optm(self) -> NamedParametersToOptimize:
+        self.named_parameters_to_optm = NamedParametersToOptimize()
+        for name in self.names_to_optm:
+            param = self.model.state_dict()[name]
+        
+            self.named_parameters_to_optm[name] = param
+            param.grad = None
         return self.named_parameters_to_optm
+    
+    def agg_model_parameters(self, local_updates):
+        """
+        Update/Aggregate the model parameters by adding local_updates
+        """
+        self.set_model_dict(local_updates)
+
 
     def forward(self, input_ids, option_len=None, generation=False):
         """
@@ -624,7 +742,25 @@ class Framework:
         metrics = {metric_name: calculate_metric(predictions, metric_name)}
         return metrics
 
-    def train(self, client_id, current_round, train_samples, dev_samples, eval_samples):
+    def get_global_eval_samples(self, local_test_sets):
+        # samples = local_test_sets[0].sample_subset(
+        #     data_split="valid", seed=0, num=self.args.num_eval
+        # )
+        samples = []
+        if self.task is None:
+            self.task = local_test_sets[0]
+        for local_dataset in local_test_sets:
+            valid_samples = local_dataset.sample_subset(
+                data_split="valid", seed=0, num=self.args.num_eval
+            )
+            samples.extend(valid_samples)
+        lens = len(samples)
+        index = np.random.permutation(lens).tolist()[:self.args.num_eval]
+        return [samples[i] for i in index]
+
+    def train(
+        self, train_samples, dev_samples, eval_samples, client_id=-1, current_round=-1
+    ):
         """
         Training function
         if self.num_dev is not None, eval_samples are dev_samples
@@ -633,98 +769,10 @@ class Framework:
         # Set tokenizer to left padding (so that all the options are right aligned)
         self.tokenizer.padding_side = "left"
 
-        class HFDataset(Dataset):
-
-            def __init__(self, data):
-                self.data = data
-
-            def __len__(self):
-                return len(self.data)
-
-            def __getitem__(self, idx):
-                return self.data[idx]
-
-        def _convert(samples):
-            """
-            Convert samples to HF-compatible dataset
-            """
-            data = []
-            for sample in samples:
-                encoded_candidates, option_lens = encode_prompt(
-                    self.task,
-                    self.task.get_template(template_version=self.args.template_ver),
-                    [],
-                    sample,
-                    self.tokenizer,
-                    max_length=self.args.max_length,
-                    generation=self.task.generation,
-                    generation_with_gold=True,
-                    max_new_tokens=self.args.max_new_tokens,
-                )
-                if self.task.generation:
-                    correct_candidate_id = 0
-                elif isinstance(sample.correct_candidate, list):
-                    correct_candidate_id = sample.candidates.index(
-                        sample.correct_candidate[0]
-                    )
-                else:
-                    correct_candidate_id = sample.candidates.index(
-                        sample.correct_candidate
-                    )
-
-                if self.args.non_diff:
-                    # For non-differentiable objective, there is no teacher forcing thus the
-                    # current answer part is removed
-                    encoded_candidates[correct_candidate_id] = encoded_candidates[
-                        correct_candidate_id
-                    ][: -option_lens[correct_candidate_id]]
-
-                if self.args.train_as_classification:
-                    # For classification, we provide the label as the correct candidate id
-                    data.append(
-                        [
-                            {
-                                "input_ids": encoded_candidates[_i],
-                                "labels": correct_candidate_id,
-                                "option_len": option_lens[_i],
-                                "num_options": len(sample.candidates),
-                            }
-                            for _i in range(len(encoded_candidates))
-                        ]
-                    )
-                elif self.args.only_train_option:
-                    # Otherwise, it is just LM-style teacher forcing
-                    if self.args.non_diff:
-                        # For non-differentiable objective, we need to provide the gold answer to calculate F1/acc
-                        data.append(
-                            {
-                                "input_ids": encoded_candidates[correct_candidate_id],
-                                "labels": encoded_candidates[correct_candidate_id],
-                                "option_len": option_lens[correct_candidate_id],
-                                "gold": sample.correct_candidate,
-                            }
-                        )
-                    else:
-                        data.append(
-                            {
-                                "input_ids": encoded_candidates[correct_candidate_id],
-                                "labels": encoded_candidates[correct_candidate_id],
-                                "option_len": option_lens[correct_candidate_id],
-                            }
-                        )
-                else:
-                    data.append(
-                        {
-                            "input_ids": encoded_candidates[correct_candidate_id],
-                            "labels": encoded_candidates[correct_candidate_id],
-                        }
-                    )
-            return data
-
         with count_time("Tokenizing training samples"):
-            train_dataset = HFDataset(_convert(train_samples))
-            eval_dataset = HFDataset(_convert(eval_samples))
-            dev_dataset = HFDataset(_convert(dev_samples))
+            train_dataset = HFDataset(convert_(self, train_samples))
+            eval_dataset = HFDataset(convert_(self, eval_samples))
+            dev_dataset = HFDataset(convert_(self, dev_samples))
 
         if self.args.only_train_option and not self.args.non_diff:
             # If --only_train_option and not with a non-differentiable objective, we wrap the forward function
@@ -738,7 +786,7 @@ class Framework:
         else:
             collator = DataCollatorForTokenClassification
 
-        trainer = OurTrainer(
+        self.trainer = OurTrainer(
             model=self.model,
             client_id=client_id,
             current_round=current_round,
@@ -755,8 +803,18 @@ class Framework:
             dev_samples=dev_samples,
             evaluate_func=self.evaluate,
         )
+
+        if self.args.trainer == "zo_dp" and self.fed_args.fed_alg == "fedavg":
+            assert (
+                self.trainer.projected_grads_list is not None
+            ), "projected_grads_list is None"
+            self.local_es_mangnitude_grad = sum(self.trainer.projected_grads_list)
+            logging.info(
+                f"Client [{client_id}]: local_es_mangnitude_grad: {self.local_es_mangnitude_grad}"
+            )
+
         if self.args.save_on_interrupt:
-            trainer.add_callback(SIGUSR1Callback())
+            self.trainer.add_callback(SIGUSR1Callback())
 
         # Resume training from a last checkpoint
         last_checkpoint = None
@@ -773,16 +831,18 @@ class Framework:
             last_checkpoint = self.args.resume_from_checkpoint
 
         # This calls the trainer._inner_training_loop()
-        logging.debug("last_checkpoint: %s" % last_checkpoint)
-        trainer.train(resume_from_checkpoint=last_checkpoint) # todo: fix for each client
+        logging.info("last_checkpoint: %s" % last_checkpoint) 
+        # if client_id != -1:
+        #     last_checkpoint = os.path.join(last_checkpoint, f"client_{client_id}")
+        self.trainer.train(resume_from_checkpoint=last_checkpoint)
 
         # Explicitly save the model
         if self.args.save_model:
             logger.info("Save model..")
-            trainer.save_model()
+            self.trainer.save_model()
 
         # FSDP compatibility
-        self.model = trainer.model
+        self.model = self.trainer.model
 
         # Reset the forward function for evaluation
         if self.args.only_train_option and not self.args.non_diff:
@@ -810,7 +870,130 @@ class Framework:
             shutil.rmtree(os.path.join(self.args.output_dir, f))
         print(f"deleted folders: ", deleted_folders)
 
+    def start_run(self):
+        train_sets = self.task.sample_train_sets(
+            num_train=self.args.num_train,
+            num_dev=self.args.num_dev,
+            num_eval=self.args.num_eval,
+            num_train_sets=self.args.num_train_sets,
+            seed=self.args.train_set_seed,
+        )
 
+        if self.args.train_set_seed is not None or self.args.num_train_sets is not None:
+
+            # Eval samples share one (or multiple) training set(s)
+            for train_set_id, train_samples in enumerate(train_sets):
+                train_set_seed = (
+                    train_set_id
+                    if self.args.train_set_seed is None
+                    else self.args.train_set_seed
+                )
+
+                # Sample eval samples
+                if self.args.num_eval is not None:
+                    eval_samples = self.task.sample_subset(
+                        data_split="valid", seed=train_set_seed, num=self.args.num_eval
+                    )
+                else:
+                    eval_samples = self.task.valid_samples
+
+                if self.args.trainer != "none":
+                    # Here the training samples are seperated
+                    if self.args.num_dev is not None:
+                        # Dev samples
+                        # assert args.num_dev + args.num_train <= len(train_samples), f"num_dev({args.num_dev})+num_train({args.num_train}) is more than actual num of training samples ({len(train_samples)})."
+                        dev_samples = train_samples[-self.args.num_dev :]
+                        train_samples = train_samples[: -self.args.num_dev]
+                        logger.info("Dev samples: %d" % len(dev_samples))
+                        logger.info("Train samples: %d" % len(train_samples))
+                    else:
+                        dev_samples = None
+                        logger.info("Train samples: %d" % len(train_samples))
+                        logger.info("No dev samples")
+
+                    self.args.dev_samples = dev_samples
+                    self.args.eval_samples = eval_samples
+
+                    # Training
+
+                    self.train(
+                        train_samples,
+                        dev_samples if dev_samples is not None else eval_samples,
+                        eval_samples,
+                    )
+
+                    if not self.args.no_eval:  # This is True
+                        metrics = self.evaluate(
+                            [], eval_samples, description="Evaluating on the Test Set"
+                        )
+                        _keys = list(metrics.keys())
+                        for m in _keys:
+                            metrics["test_" + m] = metrics[m]
+                        if dev_samples is not None:
+                            dev_metrics = self.evaluate(
+                                [],
+                                dev_samples,
+                                description="Evaluating on the Validation Set",
+                            )
+                            _keys = list(dev_metrics.keys())
+                            for m in _keys:
+                                metrics["val_" + m] = dev_metrics[m]
+                else:
+                    assert self.args.num_dev is None
+                    # Zero-shot / in-context learning
+                    metrics = self.evaluate(train_samples, eval_samples)
+                logger.info(metrics)
+                wandb.log(metrics)
+
+                if not self.args.no_eval:
+                    logger.info("===== Train set %d =====" % train_set_seed)
+                    logger.info(metrics)
+                    wandb.log(metrics)
+                    if self.args.local_rank <= 0:
+                        write_metrics_to_file(
+                            metrics,
+                            (
+                                "result/"
+                                + result_file_tag(self.args)
+                                + f"-trainset{train_set_id}.json"
+                                if self.args.result_file is None
+                                else self.args.result_file
+                            ),
+                        )
+                if self.args.trainer != "none" and self.args.clean_model_at_end:
+                    self.delete_checkpoints()
+
+        else:
+            # For each eval sample, there is a training set. no training is allowed
+            # This is for in-context learning (ICL)
+            assert self.args.trainer == "none"
+            if self.args.num_eval is not None:
+                eval_samples = self.task.sample_subset(
+                    data_split="valid", seed=0, num=self.args.num_eval
+                )
+            else:
+                eval_samples = self.task.valid_samples
+            metrics = self.evaluate(
+                train_sets, eval_samples, one_train_set_per_eval_sample=True
+            )
+            logger.info(metrics)
+            wandb.log(metrics)
+            if self.args.local_rank <= 0:
+                write_metrics_to_file(
+                    metrics,
+                    (
+                        "result/" + result_file_tag(self.args) + "-onetrainpereval.json"
+                        if self.args.result_file is None
+                        else self.args.result_file
+                    ),
+                )
+
+    def weighted_update(self, num_samples,total_samples, client_id):
+        weight = num_samples[client_id]/total_samples
+        for name in self.names_to_optm:
+            self.model.state_dict()[name].data.mul_(weight)
+
+        
 def result_file_tag(args):
     """
     Get the result file tag

@@ -25,7 +25,10 @@ def get_task(task_name):
     instance = class_(subtask)
     return instance
 
-def get_local_datasets(task_name, fed_args, args) -> List[DatasetDict]:
+
+
+
+def get_local_datasets(task_name, fed_args, args):
     """
     Get local datasets for a given task.
     Returns a list of DatasetDict objects, each containing train and validation datasets.
@@ -34,16 +37,42 @@ def get_local_datasets(task_name, fed_args, args) -> List[DatasetDict]:
     local_datasets : List[DatasetDict] = []
     if task_name.lower() == "sst2":
         dataset = load_dataset('glue', 'sst2')
-        trainset = dataset['train']
-        valset = dataset['validation']
-        # testset = dataset['test']
+    elif task_name.lower() == "copa":
+        dataset = load_dataset('super_glue', 'copa')
+    elif task_name.lower() == "boolq":
+        dataset = load_dataset('boolq')
+    elif task_name.lower() == "multirc":
+        dataset = load_dataset('super_glue', 'multirc') 
+    elif task_name.lower() == "cb":
+        dataset = load_dataset('super_glue', 'cb')
+    elif task_name.lower() == "wic":
+        dataset = load_dataset('super_glue', 'wic')
+    elif task_name.lower() == "wsc":
+        dataset = load_dataset('super_glue', 'wsc.fixed')
+    elif task_name.lower() == "record":
+        dataset = load_dataset('super_glue', 'record')
+    elif task_name.lower() == "rte":
+        dataset = load_dataset('super_glue', 'rte')   
+    elif task_name.lower() == "squad":
+        dataset = load_dataset('squad')
+    elif task_name.lower() == "drop":
+        dataset = load_dataset('drop')
+    elif task_name.lower() == "winogrande":
+        dataset = load_dataset('winogrande', 'winogrande_m')
+    else:
+        raise ValueError(f"Task {task_name} not supported.")
+    
+    trainset = dataset['train']
+    valset = dataset['validation']
 
-        local_train_datasets, local_train_num_samples = split_dataset(fed_args, seed, trainset)
-        local_val_datasets, local_val_num_samples = split_dataset(fed_args, seed, valset)
+    local_train_datasets, local_train_num_samples = split_dataset(fed_args, seed, trainset)
+    local_val_datasets, local_val_num_samples = split_dataset(fed_args, seed, valset)
 
-        for i in range(fed_args.num_clients):
-            local_datasets.append(SST2Dataset(DatasetDict({'train': local_train_datasets[i], 'validation': local_val_datasets[i]}), subtask=task_name))
-        return local_datasets, local_train_num_samples, local_val_num_samples
+    for i in range(fed_args.num_clients):
+        # Dataset class type
+        class_ = getattr(sys.modules[__name__], f"{task_name}Dataset") 
+        local_datasets.append(class_(DatasetDict({'train': local_train_datasets[i], 'validation': local_val_datasets[i]}), subtask=None))
+    return local_datasets, local_train_num_samples, local_val_num_samples, valset
 
 def get_local_trainsets(local_datasets, args):
     """
@@ -71,17 +100,18 @@ class Dataset_(Dataset):
     train_sep = "\n\n"
     generation = False  # whether this is a generation task
 
-    def __init__(self, subtask=None, **kwargs) -> None:
+    def __init__(self, dataset=None, subtask=None, **kwargs) -> None:
         self.samples = None
         self.subtask = subtask
-
+        
+    def load_dataset(self, dataset, path, **kwargs):
+        return dataset
+        
     def get_task_name(self):
         return self.subtask
-
-    def load_dataset(self, path, **kwargs):
-        raise NotImplementedError
-
-    def get_template(self, template_version=0):
+    
+    @staticmethod
+    def get_template(template_version=0):
         templates = {0: Template}
         return templates[template_version]
 
@@ -106,13 +136,15 @@ class Dataset_(Dataset):
         for i, set_seed in enumerate(seeds):
             if self.mixed_set:  # This is always False for now
                 raise NotImplementedError
-                train_samples.append(self.sample_subset(data_split="valid", seed=set_seed, num=num_train, exclude=i))
             else:
                 if num_dev is not None:
                     train_samples.append(self.sample_subset(data_split="train", seed=set_seed,
                                                             num=num_train + num_dev))  # dev set is included at the end of train set
                     if num_train + num_dev > len(self.samples["train"]):
-                        logger.warn("num_train + num_dev > available training examples")
+                        num_train = 0.7 * len(self.samples["train"])
+                        num_train = int(num_train) + 1
+                        num_dev = len(self.samples["train"]) - num_train
+        
                 else:
                     train_samples.append(self.sample_subset(data_split="train", seed=set_seed, num=num_train))
                 if num_dev is not None:
@@ -144,10 +176,9 @@ class SST2Dataset(Dataset_):
         self.load_dataset(dataset, subtask, **kwargs)
 
     def load_dataset(self, dataset, path, **kwargs):
-        if dataset is None:
+        d = super().load_dataset(dataset, path, **kwargs)
+        if d is None:
             d = load_dataset('glue', 'sst2')
-        else:
-            d = dataset
      
         train_d = d["train"]
         validation_d = d["validation"]
@@ -161,7 +192,8 @@ class SST2Dataset(Dataset_):
         label = int(example["label"])
         return Sample(id=example["idx"], data=example, correct_candidate=label, candidates=[0, 1])
 
-    def get_template(self, template_version=0):
+    @staticmethod
+    def get_template(template_version=0):
         return {0: SST2Template, 1: SST2TemplateEmpty}[template_version]()
     
 
@@ -170,12 +202,15 @@ class CopaDataset(Dataset_):
     train_sep = "\n\n"
     mixed_set = False
 
-    def __init__(self, subtask=None, **kwargs) -> None:
-        self.load_dataset(subtask, **kwargs)
+    def __init__(self,dataset=None, subtask=None, **kwargs) -> None:
+        self.load_dataset(dataset, subtask, **kwargs)
 
-    def load_dataset(self, path, **kwargs):
-        train_examples = load_dataset('super_glue', "copa")["train"]
-        valid_examples = load_dataset('super_glue', "copa")["validation"]
+    def load_dataset(self, dataset, path, **kwargs):
+        d = super().load_dataset(dataset, path, **kwargs)
+        if d is None:
+            d = load_dataset('super_glue', 'copa')
+        train_examples = d["train"]
+        valid_examples = d["validation"]
 
         train_samples = [self.build_sample(example) for example in train_examples]
         valid_samples = [self.build_sample(example) for example in valid_examples]
@@ -193,16 +228,19 @@ class CopaDataset(Dataset_):
 
         return sample
 
-    def get_template(self, template_version=0):
+    @staticmethod
+    def get_template(template_version=0):
         return {0: CopaTemplate, 1: CopaTemplateEmpty}[template_version]()
 
 
 class BoolQDataset(Dataset_):
-    def __init__(self, subtask=None, **kwargs) -> None:
-        self.load_dataset(subtask, **kwargs)
+    def __init__(self, dataset=None, subtask=None, **kwargs) -> None:
+        self.load_dataset(dataset, subtask, **kwargs)
 
-    def load_dataset(self, path, **kwargs):
-        d = load_dataset("boolq")
+    def load_dataset(self, dataset, path, **kwargs):
+        d = super().load_dataset(dataset, path, **kwargs)
+        if d is None:
+            d = load_dataset("boolq")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -219,18 +257,20 @@ class BoolQDataset(Dataset_):
             )
 
         return sample
-
-    def get_template(self, template_version=2):
+    @staticmethod
+    def get_template(template_version=2):
         return {0: BoolQTemplate, 1: BoolQTemplateV2, 2: BoolQTemplateV3}[template_version]()
 
 
 class MultiRCDataset(Dataset_):
 
-    def __init__(self, subtask=None, **kwargs) -> None:
-        self.load_dataset(subtask, **kwargs)
+    def __init__(self, dataset=None, subtask=None, **kwargs) -> None:
+        self.load_dataset(dataset, subtask, **kwargs)
 
-    def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "multirc")
+    def load_dataset(self, dataset, path, **kwargs):
+        d = super().load_dataset(dataset, path, **kwargs)
+        if d is None:
+            d = load_dataset("super_glue", "multirc")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -248,17 +288,20 @@ class MultiRCDataset(Dataset_):
 
         return sample
 
-    def get_template(self, template_version=0):
+    @staticmethod
+    def get_template(template_version=0):
         return {0: MultiRCTemplate}[template_version]()
 
 
 class CBDataset(Dataset_):
 
-    def __init__(self, subtask=None, **kwargs) -> None:
-        self.load_dataset(subtask, **kwargs)
+    def __init__(self, dataset=None, subtask=None, **kwargs) -> None:
+        self.load_dataset(dataset, subtask, **kwargs)
 
-    def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "cb")
+    def load_dataset(self,dataset, path, **kwargs):
+        d = super().load_dataset(dataset, path, **kwargs)
+        if d is None:
+            d = load_dataset("super_glue", "cb")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -276,17 +319,20 @@ class CBDataset(Dataset_):
 
         return sample
 
-    def get_template(self, template_version=0):
+    @staticmethod
+    def get_template(template_version=0):
         return {0: CBTemplate}[template_version]()
 
 
 class WICDataset(Dataset_):
 
-    def __init__(self, subtask=None, **kwargs) -> None:
-        self.load_dataset(subtask, **kwargs)
+    def __init__(self,dataset=None, subtask=None, **kwargs) -> None:
+        self.load_dataset(dataset, subtask, **kwargs)
 
-    def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "wic")
+    def load_dataset(self, dataset, path, **kwargs):
+        d = super().load_dataset(dataset, path, **kwargs)
+        if d is None:
+            d = load_dataset("super_glue", "wic")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -304,17 +350,20 @@ class WICDataset(Dataset_):
 
         return sample
 
-    def get_template(self, template_version=0):
+    @staticmethod
+    def get_template(template_version=0):
         return {0: WICTemplate}[template_version]()
 
 
 class WSCDataset(Dataset_):
 
-    def __init__(self, subtask=None, **kwargs) -> None:
-        self.load_dataset(subtask, **kwargs)
+    def __init__(self, dataset=None, subtask=None, **kwargs) -> None:
+        self.load_dataset(dataset, subtask, **kwargs)
 
-    def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "wsc.fixed")
+    def load_dataset(self,dataset, path, **kwargs):
+        d = super().load_dataset(dataset, path, **kwargs)
+        if d is None:
+            d = load_dataset("super_glue", "wsc.fixed")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -331,18 +380,20 @@ class WSCDataset(Dataset_):
             )
 
         return sample
-
-    def get_template(self, template_version=0):
+    @staticmethod
+    def get_template(template_version=0):
         return {0: WSCTemplate}[template_version]()
 
 
 class ReCoRDDataset(Dataset_):
 
-    def __init__(self, subtask=None, **kwargs) -> None:
-        self.load_dataset(subtask, **kwargs)
+    def __init__(self, dataset=None, subtask=None, **kwargs) -> None:
+        self.load_dataset(dataset, subtask, **kwargs)
 
-    def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "record")
+    def load_dataset(self,dataset, path, **kwargs):
+        d = super().load_dataset(dataset, path, **kwargs)
+        if d is None:
+            d = load_dataset("super_glue", "record")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -360,17 +411,20 @@ class ReCoRDDataset(Dataset_):
 
         return sample
 
-    def get_template(self, template_version=0):
+    @staticmethod
+    def get_template(template_version=0):
         return {0: ReCoRDTemplateGPT3}[template_version]()
 
 
 class RTEDataset(Dataset_):
 
-    def __init__(self, subtask=None, **kwargs) -> None:
-        self.load_dataset(subtask, **kwargs)
+    def __init__(self, dataset=None, subtask=None, **kwargs) -> None:
+        self.load_dataset(dataset, subtask, **kwargs)
 
-    def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "rte")
+    def load_dataset(self,dataset, path, **kwargs):
+        d = super().load_dataset(dataset, path, **kwargs)
+        if d is None:
+            d = load_dataset("super_glue", "rte")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -388,7 +442,8 @@ class RTEDataset(Dataset_):
 
         return sample
 
-    def get_template(self, template_version=0):
+    @staticmethod
+    def get_template(template_version=0):
         return {0: RTETemplate, 1: RTETemplateEmpty}[template_version]()
 
 
@@ -396,13 +451,15 @@ class SQuADDataset(Dataset_):
     metric_name = "f1"
     generation = True
 
-    def __init__(self, subtask=None, **kwargs) -> None:
-        self.load_dataset()
+    def __init__(self, dataset=None, subtask=None, **kwargs) -> None:
+        self.load_dataset(dataset)
 
-    def load_dataset(self):
-        dataset = load_dataset("squad")
-        train_examples = dataset["train"]
-        valid_examples = dataset["validation"]
+    def load_dataset(self, dataset):
+        d = super().load_dataset(dataset, None)
+        if d is None:
+            d = load_dataset("squad")
+        train_examples = d["train"]
+        valid_examples = d["validation"]
 
         train_samples = [self.build_sample(example, idx) for idx, example in enumerate(train_examples)]
         valid_samples = [self.build_sample(example, idx) for idx, example in enumerate(valid_examples)]
@@ -424,7 +481,8 @@ class SQuADDataset(Dataset_):
             correct_candidate=answers
         )
 
-    def get_template(self, template_version=0):
+    @staticmethod
+    def get_template(template_version=0):
         return {0: SQuADv2Template}[template_version]()
 
 
@@ -432,13 +490,15 @@ class DROPDataset(Dataset_):
     metric_name = "f1"
     generation = True
 
-    def __init__(self, subtask=None, **kwargs) -> None:
-        self.load_dataset()
+    def __init__(self, dataset=None, subtask=None, **kwargs) -> None:
+        self.load_dataset(dataset)
 
-    def load_dataset(self):
-        dataset = load_dataset("drop")
-        train_examples = dataset["train"]
-        valid_examples = dataset["validation"]
+    def load_dataset(self, dataset):
+        d = super().load_dataset(dataset, None)
+        if d is None:
+            d = load_dataset("drop")
+        train_examples = d["train"]
+        valid_examples = d["validation"]
 
         train_samples = [self.build_sample(example, idx) for idx, example in enumerate(train_examples)]
         valid_samples = [self.build_sample(example, idx) for idx, example in enumerate(valid_examples)]
@@ -459,18 +519,22 @@ class DROPDataset(Dataset_):
             correct_candidate=answers
         )
 
-    def get_template(self, template_version=0):
+    @staticmethod
+    def get_template(template_version=0):
         return {0: DROPTemplate}[template_version]()
 
 
 class WinoGrandeDataset(Dataset_):
-    def __init__(self, subtask=None, **kwargs) -> None:
-        super().__init__(subtask, **kwargs)
-        self.load_dataset(subtask, **kwargs)
+    def __init__(self, dataset=None, subtask=None, **kwargs) -> None:
+        super().__init__(dataset, subtask, **kwargs)
+        self.load_dataset(dataset, subtask, **kwargs)
 
-    def load_dataset(self, path, **kwargs):
-        train_set = load_dataset('winogrande', 'winogrande_m', split='train')
-        valid_set = load_dataset('winogrande', 'winogrande_m', split='validation')
+    def load_dataset(self,dataset, path, **kwargs):
+        d = super().load_dataset(dataset, path, **kwargs)
+        if d is None:
+            d = load_dataset('winogrande', 'winogrande_m')
+        train_set = d['train']
+        valid_set = d['validation']
 
         train_samples = [self.build_sample(example) for example in train_set]
         valid_samples = [self.build_sample(example) for example in valid_set]
@@ -489,8 +553,11 @@ class WinoGrandeDataset(Dataset_):
         )
         return sample
 
-    def get_template(self, template_version=0):
+    @staticmethod
+    def get_template(template_version=0):
         if template_version == 0:
             return WinoGrandeTemplate()
         else:
             raise NotImplementedError(f"Template version {template_version} not implemented for WinoGrande")
+
+
