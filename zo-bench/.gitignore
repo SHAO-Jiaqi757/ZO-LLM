@@ -2,4 +2,4 @@ result
 tests
 wandb
 models
-sweeps
+sweeps/classification*
