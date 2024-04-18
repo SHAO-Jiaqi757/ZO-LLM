@@ -15,7 +15,7 @@ from modeling_mistral import (
 from tasks import *
 from utils import *
 from federated_learning.our_framework import ourFramework
-from fl_utils import *
+from federated_learning.fl_utils import *
 
 os.environ["TRANSFORMERS_CACHE"] = "./cache"
 
@@ -56,20 +56,15 @@ def main():
     set_seed(args.seed)
     
     
-    # task = get_task(args.task_name)
+    task = get_task(args.task_name)
     # fl
     if fl:
-        local_datasets, local_train_num_samples, local_val_num_samples, entire_valset = get_local_datasets(args.task_name, fed_args, args)
-        
-        logging.info(f"Number of train samples for each client: {local_train_num_samples}")
-        logging.info(f"Number of val samples for each client: {local_val_num_samples}")
-        local_trainsets = get_local_trainsets(local_datasets, args)
+        partition_proportions = get_local_samples_distribution(fed_args) 
 
         if args.trainer == "zo_dp":
-            framework = ourFramework(args, None, fed_args)
+            framework = ourFramework(args, task, fed_args)
         else:
-                    
-            framework = Framework(args, None, fed_args)
+            framework = Framework(args, task, fed_args)
 
         # if has lastest round, load the model
         ch_round = 0
@@ -92,74 +87,42 @@ def main():
             print(f">> ==================== Round {round+1} : {sampled_clients} ====================")
             
             print(f"clients_this_round: {sampled_clients}")
-            num_samples = [local_train_num_samples[client_id] for client_id in sampled_clients]
-            total_samples = sum(num_samples)
+            
             if args.trainer == "zo_dp":
                 framework.before_broadcast()
                 
-            for client_id in sampled_clients:
+            for i, client_id in enumerate(sampled_clients):
                 # local train start
-                # framework.model.cuda()
-                train_client(args, framework, client_id, round, local_datasets[client_id], local_trainsets[client_id], logger, wandb)
+                weight = partition_proportions[client_id]
+                train_client(args, framework, client_id, round, weight, logger, wandb)
                 
                 if args.trainer == "zo_dp":
-                    framework.after_local_train(num_samples=num_samples, total_samples=total_samples, client_id=client_id)
+                    framework.after_local_train(weight)
                     
-                if args.trainer == "zo_dp":
-                    continue # no need to update the local updates for zo_dp
                 else: 
-                    framework.weighted_update(num_samples, total_samples, client_id)
+                    framework.weighted_update(weight, client_id)
                     if local_updates is None:
                         local_updates = framework.get_named_parameters_to_optm()
                     else:
                         local_updates += framework.get_named_parameters_to_optm()
                 
-
-                framework.model.load_state_dict(torch.load(os.path.join(args.output_dir, f"round_{round}.pth"))) # reset the model parameters to the global model for next client
+                if i != len(sampled_clients) - 1:
+                    framework.model.load_state_dict(torch.load(os.path.join(args.output_dir, f"round_{round}.pth"))) # reset the model parameters to the global model for next client
 
             # client training done for one round
             local_updates = framework.local_es_mangnitude_grads if args.trainer == "zo_dp" and fed_args.fed_alg == "fedavg" else local_updates
-            global_aggregation(fed_args, framework, local_updates, round)
-            torch.save(framework.model.state_dict(), os.path.join(args.output_dir, f"round_{round+1}.pth")) # save the global model for next round
-            logging.info(f"Gloabl model saved to round_{round+1}.pth")
-            
+            global_aggregation(args, fed_args, framework, local_updates, round)
+
             # save the lastest round (int) 
             with open(os.path.join(args.output_dir, "round.txt"), "w") as f:
                     f.write(str(round+1))
-                
-                
-
             local_updates = None
+            
             # global eval samples
-            eval_samples = framework.get_global_eval_samples(local_datasets)
-            
-            if fed_args.global_eval:  
-                metrics = framework.evaluate(
-                    [], eval_samples, description="Evaluating on the Gloabl Test Set"
-                )
-                _keys = list(metrics.keys())
-                for m in _keys:
-                    metrics["g_test_" + m] = metrics[m]
-                
-            
-                if args.local_rank <= 0:
-                    logger.info(metrics)
-                    wandb.log(metrics)
-                    write_metrics_to_file(
-                        metrics,
-                        (
-                            "result/"
-                            + result_file_tag(args)
-                            + f"-fl{round}.json"
-                            if fed_args.g_result_file is None
-                            else fed_args.g_result_file
-                        ),
-                    )
-            if args.trainer != "none" and args.clean_model_at_end:
-                framework.delete_checkpoints()
+            framework.fl_global_eval()
+
                 
     else:
-        task = get_task(args.task_name)
         # Initialize trainer and load model
         framework = Framework(args, task)
         framework.start_run()

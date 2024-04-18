@@ -8,7 +8,6 @@ from datasets import load_dataset, Dataset, DatasetDict
 
 from templates import *
 from utils import temp_seed
-from federated_learning.split_dataset import split_dataset
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -24,67 +23,6 @@ def get_task(task_name):
     class_ = getattr(sys.modules[__name__], f"{task_group}Dataset")
     instance = class_(subtask)
     return instance
-
-
-
-
-def get_local_datasets(task_name, fed_args, args):
-    """
-    Get local datasets for a given task.
-    Returns a list of DatasetDict objects, each containing train and validation datasets.
-    """        
-    seed = args.train_set_seed
-    local_datasets : List[DatasetDict] = []
-    if task_name.lower() == "sst2":
-        dataset = load_dataset('glue', 'sst2')
-    elif task_name.lower() == "copa":
-        dataset = load_dataset('super_glue', 'copa')
-    elif task_name.lower() == "boolq":
-        dataset = load_dataset('boolq')
-    elif task_name.lower() == "multirc":
-        dataset = load_dataset('super_glue', 'multirc') 
-    elif task_name.lower() == "cb":
-        dataset = load_dataset('super_glue', 'cb')
-    elif task_name.lower() == "wic":
-        dataset = load_dataset('super_glue', 'wic')
-    elif task_name.lower() == "wsc":
-        dataset = load_dataset('super_glue', 'wsc.fixed')
-    elif task_name.lower() == "record":
-        dataset = load_dataset('super_glue', 'record')
-    elif task_name.lower() == "rte":
-        dataset = load_dataset('super_glue', 'rte')   
-    elif task_name.lower() == "squad":
-        dataset = load_dataset('squad')
-    elif task_name.lower() == "drop":
-        dataset = load_dataset('drop')
-    elif task_name.lower() == "winogrande":
-        dataset = load_dataset('winogrande', 'winogrande_m')
-    else:
-        raise ValueError(f"Task {task_name} not supported.")
-    
-    trainset = dataset['train']
-    valset = dataset['validation']
-
-    local_train_datasets, local_train_num_samples = split_dataset(fed_args, seed, trainset)
-    local_val_datasets, local_val_num_samples = split_dataset(fed_args, seed, valset)
-
-    for i in range(fed_args.num_clients):
-        # Dataset class type
-        class_ = getattr(sys.modules[__name__], f"{task_name}Dataset") 
-        local_datasets.append(class_(DatasetDict({'train': local_train_datasets[i], 'validation': local_val_datasets[i]}), subtask=None))
-    return local_datasets, local_train_num_samples, local_val_num_samples, valset
-
-def get_local_trainsets(local_datasets, args):
-    """
-    Sample train sets for each local dataset.
-    Returns a list of train sets for each local dataset.
-    """
-    trainsets = []
-    for local_dataset in local_datasets:
-        train_sets = local_dataset.sample_train_sets(num_train=args.num_train, num_dev=args.num_dev, num_eval=args.num_eval,
-                                        num_train_sets=args.num_train_sets, seed=args.train_set_seed)
-        trainsets.append(train_sets)
-    return trainsets
 
 
 @dataclass
@@ -156,6 +94,7 @@ class Dataset_(Dataset):
         with temp_seed(seed):
             samples = self.samples[data_split]
             lens = len(samples)
+            logger.info(f"Sampling {num} samples from {data_split} set of size {lens}")
             index = np.random.permutation(lens).tolist()[:num if exclude is None else num + 1]
             if exclude is not None and exclude in index:
                 index.remove(exclude)
