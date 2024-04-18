@@ -91,11 +91,11 @@ class ourFramework(Framework):
         self.sample_model_directions() # self.directions is set
         self.local_es_mangnitude_grads = 0
         
-    def after_local_train(self, num_samples, total_samples, client_id):
+    def after_local_train(self, weight):
         # gather the mangnitude of the gradients
         assert self.client_id == -1
         
-        self.local_es_mangnitude_grads += num_samples[client_id]/total_samples * self.local_es_mangnitude_grad
+        self.local_es_mangnitude_grads += weight * self.local_es_mangnitude_grad
         
         
         
