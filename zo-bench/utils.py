@@ -203,7 +203,7 @@ class OurArguments(TrainingArguments):
     top_p: float = 0.95  # top-p for generation
     max_new_tokens: int = 50  # max number of new tokens to generate
     eos_token: str = "\n"  # end of sentence token
-
+    per_device_eval_batch_size: int = 1  # batch size for evaluationRTE    
     # Saving
     save_model: bool = False  # whether to save the model
     no_eval: bool = False  # whether to skip evaluation
