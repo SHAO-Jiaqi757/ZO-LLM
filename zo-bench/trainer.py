@@ -127,13 +127,13 @@ class OurTrainer(Trainer):
         self.evaluate_func = evaluate_func
         self.dev_samples = dev_samples
         self.eval_samples = eval_samples
-        
-        self.projected_grads_list = []
-        self.explore_direction = None
+        self.local_projected_grads = 0
         self.client_id = client_id
         self.current_round = current_round
         if self.client_id != -1 and self.current_round != -1: # not fl
             self.base_log = {"client_id": self.client_id, "round": self.current_round}
+            self.global_seed = self.current_round
+
         else:
             self.base_log = {}
     def _inner_training_loop(
@@ -486,8 +486,8 @@ class OurTrainer(Trainer):
                         tr_loss_step = self.zo_step_v1(model, inputs)
                     else:
                         raise ValueError(f"q={args.q} is not supported.")
-                elif args.trainer == "zo_dp":
-                    tr_loss_step = self.zo_dp_step(model, inputs) 
+                elif args.trainer == "zo_fl":
+                    tr_loss_step = self.zo_step(model, inputs)
                 elif args.trainer == "zo_conserv":
                     tr_loss_step = self.zo_conserv_step(model, inputs)
                 elif args.trainer == "forward_grad":
@@ -711,6 +711,9 @@ class OurTrainer(Trainer):
 
         for _, param in self.named_parameters_to_optim:
             z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+            if self.args.trainer == "zo_fl":
+                # normalize the z
+                z = z / torch.norm(z)
             param.data.add_(scaling_factor * z * self.args.zo_eps)
 
     def zo_forward(self, model, inputs):
@@ -772,7 +775,9 @@ class OurTrainer(Trainer):
                 param.grad = None  # Make sure the grad is empty and will not be updated.
 
         # Sample the random seed for sampling z
-        self.zo_random_seed = np.random.randint(1000000000)
+        if self.global_seed is not None:
+            self.zo_random_seed = self.global_seed # the same direction for the same round
+        else: self.zo_random_seed = np.random.randint(1000000000)
 
         # First function evaluation
         self.zo_perturb_parameters(scaling_factor=1)
@@ -780,7 +785,7 @@ class OurTrainer(Trainer):
 
         # Second function evaluation
         assert args.q == 1, "only support q=1 for the memory efficiency. If you want to implement q>1, need to store random seeds to save memory. In addition, we need to set different random seed for different z in the q-loop."
-        for _ in range(args.q):  # TODO shall we change the seed?
+        for _ in range(args.q):  
             if self.args.perturbation_mode == "one_side":
                 self.zo_perturb_parameters(scaling_factor=-1)
                 loss2 = self.zo_forward(model, inputs)
@@ -800,12 +805,20 @@ class OurTrainer(Trainer):
             else:
                 if args.zo_max_grad_norm is not None:
                     self.projected_grad = min(self.projected_grad, args.zo_max_grad_norm)
+            
+            if self.args.trainer == "zo_fl":
+                self.local_projected_grads += self.projected_grad # accumulate the gradient for the local update
+                
             # Set the random seed to ensure that we sample the same z for perturbation/update
+
             torch.manual_seed(self.zo_random_seed)
             for name, param in self.named_parameters_to_optim:
                 # Resample z
                 z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device,
                                  dtype=param.data.dtype)
+                if self.args.trainer == "zo_fl":
+                    # normalize the z
+                    z = z / torch.norm(z)
 
                 if args.trainer == "zo_sign_opt":
                     # ----signOpt_orig
@@ -827,7 +840,8 @@ class OurTrainer(Trainer):
                 
                 # gradient normalization (in-place)
                 torch.nn.utils.clip_grad_norm_(param.grad, args.max_grad_norm) # TODO: remove
-     
+                
+                # quantization 
                 if self.args.compression is not None: # compress the graident
                     try:
                         param.grad, residual = eval(f"self.{self.args.compression}(param.grad, self.args.d, self.args.correction)")
@@ -843,10 +857,7 @@ class OurTrainer(Trainer):
                 # param.data = param.data - graddiff_times_z / args.q  # NOTE this q division does not work for q>1.
                 param.grad = None  # avoid further update.
 
-        # for name, param in self.named_parameters_to_optim:
-        #     param.grad = param.grad / args.q
 
-        # No gradient accumulation support
         assert self.args.gradient_accumulation_steps == 1
 
         return loss1
@@ -1009,59 +1020,7 @@ class OurTrainer(Trainer):
 
         return loss1
 
-    
-    @torch.no_grad()
-    def zo_dp_step(self, model, inputs):
-        """
-        Estimate gradient by MeZO. Return the loss from f(theta + z)
-        """
-        args = self.args
 
-        # What parameters to optimize
-        self.named_parameters_to_optim = []
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.named_parameters_to_optim.append((name, param))
-                param.grad = None  # Make sure the grad is empty and will not be updated.
-
-        # Sample the random seed for sampling z
-        self.zo_random_seed = np.random.randint(1000000000)
-
-        # First function evaluation
-        self.zo_dp_pertub_parameters(scaling_factor=1)
-        loss1 = self.zo_forward(model, inputs)
-
-        # Second function evaluation
-        assert args.q == 1, "only support q=1 for the memory efficiency. If you want to implement q>1, need to store random seeds to save memory. In addition, we need to set different random seed for different z in the q-loop."
-        for _ in range(args.q): 
-            if self.args.perturbation_mode == "one_side":
-                self.zo_dp_pertub_parameters(scaling_factor=-1)
-                loss2 = self.zo_forward(model, inputs)
-                self.projected_grad = ((loss1 - loss2) / self.args.zo_eps).item()
-            else:  # two side perturbation
-                self.zo_dp_pertub_parameters(scaling_factor=-2)
-                loss2 = self.zo_forward(model, inputs)
-                self.projected_grad = ((loss1 - loss2) / (2 * self.args.zo_eps)).item()
-
-                # Reset model back to its parameters at start of step
-                self.zo_dp_pertub_parameters(scaling_factor=1)
-
-            # Set the random seed to ensure that we sample the same z for perturbation/update
-            self.projected_grads_list.append(self.projected_grad)
-            
-            torch.manual_seed(self.zo_random_seed)
-            for name, param in self.named_parameters_to_optim:
-                # Resample z
-                shift = self.sample_uniform_hypercube(param.data.size())
-                z = self.explore_directions[name] + shift
-                graddiff_times_z = self.projected_grad * z
-                param.grad = graddiff_times_z / args.q  # NOTE this q division does not work for q>1.
-                self.optimizer.step()  # will only update grad that is not None.
-                param.grad = None  # avoid further update.
-        # No gradient accumulation support
-        assert self.args.gradient_accumulation_steps == 1
-
-        return loss1
 
     @torch.no_grad()
     def zo_conserv_step(self, model, inputs):

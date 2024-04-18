@@ -2,5 +2,9 @@ result
 tests
 wandb
 models
+<<<<<<< HEAD
 sweeps
 logs
+=======
+sweeps/classification*
+>>>>>>> a7a9c203a841ccc44cc6c50e2f94decafd407f61

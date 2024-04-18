@@ -8,39 +8,41 @@ import torch
 class ourFramework(Framework):
     def __init__(self, args, task, fed_args):
         super().__init__(args, task, fed_args)
-        self.explore_direction = None
         self.local_es_mangnitude_grads = 0
         
-    @staticmethod   
-    def sample_unit_sphere(d, num_samples):
-        """
-        Sample points uniformly at random from the (d-1)-dimensional unit sphere.
+    # @staticmethod   
+    # def sample_unit_sphere(d, num_samples):
+    #     """
+    #     Sample points uniformly at random from the (d-1)-dimensional unit sphere.
 
-        Args:
-            d (int): Dimension of the Euclidean space.
-            num_samples (int): Number of samples to generate.
+    #     Args:
+    #         d (int): Dimension of the Euclidean space.
+    #         num_samples (int): Number of samples to generate.
 
-        Returns:
-            np.ndarray: Array of shape (num_samples, d) containing the sampled points.
-        """
+    #     Returns:
+    #         np.ndarray: Array of shape (num_samples, d) containing the sampled points.
+    #     """
 
-        direction = np.random.normal(size=(num_samples, d))
-        direction *= np.sqrt(d) / np.linalg.norm(direction, axis=1, keepdims=True)
-        return direction
+    #     direction = np.random.normal(size=(num_samples, d))
+    #     direction *= np.sqrt(d) / np.linalg.norm(direction, axis=1, keepdims=True)
+    #     return direction
 
 
-    def sample_model_directions(self):
-        """
-        Sample directions for the parameters of a deep learning model.
-        Returns:
-            list of np.ndarray: A list of sampled directions, one for each layer in the model.
-        """
-        self.explore_direction = {}
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                dim = param.numel()
-                direction = self.sample_unit_sphere(dim, 1).squeeze(0)
-                self.explore_direction[name] = np.reshape(direction, param.shape)
+    # def sample_model_directions(self):
+    #     """
+    #     Sample directions for the parameters of a deep learning model.
+    #     Returns:
+    #         list of np.ndarray: A list of sampled directions, one for each layer in the model.
+    #     """
+    #     self.explore_direction = {}
+    #     for name, param in self.model.named_parameters():
+    #         if param.requires_grad:
+    #             dim = param.numel()
+    #             direction = self.sample_unit_sphere(dim, 1).squeeze(0)
+    #             self.explore_dire
+    def before_broadcast(self, current_round):
+        # sample_model_directions
+        self.global_seed = current_round
 
     def agg_model_parameters(self, scalar):
         """
@@ -51,11 +53,19 @@ class ourFramework(Framework):
             scalar (float): The scalar value to multiply with direction.
         """
         state_dict = self.model.state_dict()
-    
+        torch.manual_seed(self.global_seed) 
+        
         for name in self.names_to_optm:
-            state_dict[name].data.add_(scalar * self.explore_direction[name])
-            
-        self.model.load_state_dict(state_dict)
+            param = state_dict[name]
+            z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+            # normalize the direction
+            z  /= z.norm()
+            # sgd update
+            state_dict[name].grad = z * scalar
+            self.trainer.optimizer.step()
+            self.trainer.optimizer.zero_grad()
+                
+        
         
 
 
@@ -86,10 +96,6 @@ class ourFramework(Framework):
     #     for r in range(iterations):
     #         self._reset_model_parameters(scalars[r])
 
-    def before_broadcast(self):
-        # sample_model_directions
-        self.sample_model_directions() # self.directions is set
-        self.local_es_mangnitude_grads = 0
         
     def after_local_train(self, weight):
         # gather the mangnitude of the gradients

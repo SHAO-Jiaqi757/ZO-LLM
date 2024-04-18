@@ -165,7 +165,7 @@ class OurArguments(TrainingArguments):
     ## - zo_adam: zeroth-order Adam training
     ## - zo_sign_opt: zeroth-order sign sgd training
     ## - forward_grad: forward gradient
-    ## - zo_dp: zeroth-order DP training
+    ## - zo_fl: zeroth-order DP training
     optimizer: str = "adamw"
     ## options
     ## - sgd
@@ -822,14 +822,12 @@ class Framework:
             evaluate_func=self.evaluate,
         )
 
-        if self.args.trainer == "zo_dp" and self.fed_args.fed_alg == "fedavg":
-            assert (
-                self.trainer.projected_grads_list is not None
-            ), "projected_grads_list is None"
-            self.local_es_mangnitude_grad = sum(self.trainer.projected_grads_list)
+        if self.args.trainer == "zo_fl" and self.fed_args.fed_alg == "fedavg":
+            self.local_es_mangnitude_grad = self.trainer.local_projected_grads
             logging.info(
                 f"Client [{client_id}]: local_es_mangnitude_grad: {self.local_es_mangnitude_grad}"
             )
+            self.trainer.local_projected_grads = 0 # reset the local_projected_grads
 
         if self.args.save_on_interrupt:
             self.trainer.add_callback(SIGUSR1Callback())

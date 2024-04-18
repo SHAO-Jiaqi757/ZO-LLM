@@ -61,7 +61,7 @@ def main():
     if fl:
         partition_proportions = get_local_samples_distribution(fed_args) 
 
-        if args.trainer == "zo_dp":
+        if args.trainer == "zo_fl":
             framework = ourFramework(args, task, fed_args)
         else:
             framework = Framework(args, task, fed_args)
@@ -88,15 +88,15 @@ def main():
             
             print(f"clients_this_round: {sampled_clients}")
             
-            if args.trainer == "zo_dp":
-                framework.before_broadcast()
+            if args.trainer == "zo_fl":
+                framework.before_broadcast(round) # set global seed for exploration
                 
             for i, client_id in enumerate(sampled_clients):
                 # local train start
                 weight = partition_proportions[client_id]
                 train_client(args, framework, client_id, round, weight, logger, wandb)
                 
-                if args.trainer == "zo_dp":
+                if args.trainer == "zo_fl":
                     framework.after_local_train(weight)
                     
                 else: 
@@ -106,11 +106,10 @@ def main():
                     else:
                         local_updates += framework.get_named_parameters_to_optm()
                 
-                if i != len(sampled_clients) - 1:
-                    framework.model.load_state_dict(torch.load(os.path.join(args.output_dir, f"round_{round}.pth"))) # reset the model parameters to the global model for next client
+                framework.model.load_state_dict(torch.load(os.path.join(args.output_dir, f"round_{round}.pth"))) # reset the model parameters to the global model for next client
 
             # client training done for one round
-            local_updates = framework.local_es_mangnitude_grads if args.trainer == "zo_dp" and fed_args.fed_alg == "fedavg" else local_updates
+            local_updates = framework.local_es_mangnitude_grads if args.trainer == "zo_fl" and fed_args.fed_alg == "fedavg" else local_updates
             global_aggregation(args, fed_args, framework, local_updates, round)
 
             # save the lastest round (int) 
