@@ -19,7 +19,7 @@ class NamedParametersToOptimize(OrderedDict):
         """
         result = NamedParametersToOptimize(self)
         for name, param in other.items():
-            result[name].data.add_(param.data)
+            result[name] = self[name] + param if name in self else param
         return result
     def __mul__(self, scalar):
         """

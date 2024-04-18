@@ -71,6 +71,8 @@ from transformers.utils import (
     logging,
 )
 
+from src.compress import *
+
 # from torch.optim.optimizer import StateDict, params_t
 import wandb
 from metrics import f1
@@ -334,6 +336,8 @@ class OurTrainer(Trainer):
 
         # Train!
         logger.info("***** Running training *****")
+        if self.client_id != -1 and self.current_round != -1:
+            logger.info(f"Client {self.client_id} in round {self.current_round}")
         logger.info(f"  Num examples = {num_examples}")
         logger.info(f"  Num Epochs = {num_train_epochs}")
         logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
@@ -647,7 +651,7 @@ class OurTrainer(Trainer):
         # Gradient clipping
         if args.max_grad_norm is not None and args.max_grad_norm > 0 and not self.deepspeed:
             # deepspeed does its own clipping
-
+            logger.info(f"Clipping gradients with norm {args.max_grad_norm}")
             if self.do_grad_scaling:
                 # Reduce gradients first for XLA
                 if is_torch_tpu_available():
@@ -785,10 +789,16 @@ class OurTrainer(Trainer):
                 self.zo_perturb_parameters(scaling_factor=-2)
                 loss2 = self.zo_forward(model, inputs)
                 self.projected_grad = ((loss1 - loss2) / (2 * self.args.zo_eps)).item()
-
                 # Reset model back to its parameters at start of step
                 self.zo_perturb_parameters(scaling_factor=1)
-
+            
+            
+            # clipling the gradient with args.max_grad_norm
+            # if self.projected_grad is overflow in tensor(nan, )
+            if math.isnan(self.projected_grad) or math.isinf(self.projected_grad):
+                self.projected_grad = 0
+            else:
+                self.projected_grad = min(self.projected_grad, args.zo_max_grad_norm)
             # Set the random seed to ensure that we sample the same z for perturbation/update
             torch.manual_seed(self.zo_random_seed)
             for name, param in self.named_parameters_to_optim:
@@ -798,7 +808,6 @@ class OurTrainer(Trainer):
 
                 if args.trainer == "zo_sign_opt":
                     # ----signOpt_orig
-                    # TODo why do we multiply lr here? We will multiply lr twice?
                     graddiff_times_z = np.sign(self.projected_grad) * z
                     # ----signOpt_mul_sign
                     # graddiff_times_z = self._get_learning_rate() * torch.sign(self.projected_grad * z)
@@ -806,14 +815,29 @@ class OurTrainer(Trainer):
                     # ----mezo original
                     graddiff_times_z = self.projected_grad * z
 
-                # # previous implementation
-                # # no param.grad involved
-                # param.data -= self._get_learning_rate() * self.projected_grad * z
-
-                # param.grad += graddiff_times_z.detach()
-                # more mem-efficient:
-                # run optimizer.step here to avoid caching all grad.
+                
                 param.grad = graddiff_times_z / args.q  # NOTE this q division does not work for q>1.
+                
+                residual = None
+                if self.args.compression is not None and self.args.correction:
+                    if os.path.exists(os.path.join(self.args.output_dir, f"residual_{self.client_id}_{self.current_round-1}.pt")):
+                        residual = torch.load(os.path.join(self.args.output_dir, f"residual_{self.client_id}_{self.current_round-1}.pt"))
+                        param.grad += residual
+                
+                # gradient normalization (in-place)
+                torch.nn.utils.clip_grad_norm_(param.grad, args.max_grad_norm) # TODO: remove
+     
+                if self.args.compression is not None: # compress the graident
+                    try:
+                        param.grad, residual = eval(f"self.{self.args.compression}(param.grad, self.args.d, self.args.correction)")
+                    except AttributeError:
+                        raise AttributeError(f"Compression method {self.args.compression} not found.")
+                if residual is not None: # residual correction
+                    # save residual for next iteration
+                    save_path = os.path.join(self.args.output_dir, f"residual_{self.client_id}_{self.current_round}.pt")
+                    torch.save(residual, save_path)
+                          
+                
                 self.optimizer.step()  # will only update grad that is not None.
                 # param.data = param.data - graddiff_times_z / args.q  # NOTE this q division does not work for q>1.
                 param.grad = None  # avoid further update.
@@ -918,12 +942,10 @@ class OurTrainer(Trainer):
         for name, param in model.named_parameters():
             if param.requires_grad:
                 self.named_parameters_to_optim.append((name, param))
-                # # TODO avoid init the memory for grad.
-                # param.grad = torch.zeros_like(param.data)
 
         seed_list = []
         projected_grad_list = []
-        for i_q in range(args.q):  # TODO shall we change the seed?
+        for i_q in range(args.q): 
             # Sample the random seed for sampling z
             self.zo_random_seed = np.random.randint(1000000000)
             seed_list.append(self.zo_random_seed)
@@ -970,11 +992,6 @@ class OurTrainer(Trainer):
                     # ----mezo original
                     graddiff_times_z += projected_grad_list[i_q] * z
 
-                # # previous implementation
-                # # no param.grad involved
-                # param.data -= self._get_learning_rate() * self.projected_grad * z
-
-                # param.grad += graddiff_times_z.detach()
                 # more mem-efficient:
                 # run optimizer.step here to avoid caching all grad.
                 if i_q == args.q - 1:

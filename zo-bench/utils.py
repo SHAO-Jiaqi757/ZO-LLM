@@ -113,9 +113,16 @@ class OurArguments(TrainingArguments):
     task_name: str = (
         "SST2"  # task name should match the string before Dataset in the Dataset class name. We support the following task_name: SST2, RTE, CB, BoolQ, WSC, WIC, MultiRC, Copa, ReCoRD, SQuAD, DROP
     )
-
+    zo_max_grad_norm: float = 1.0  # max grad norm in zeroth-order optimization
     dp_eps: float = 0.1  # epsilon in differential privacy
     
+    ## compression related
+    compression: str = None  # compression method
+    # support qsgd_b
+    d : int = 0  # quantization level
+    correction: bool = False  # whether to use correction for compression
+    
+     
     # Number of examples
     num_train: int = (
         0  # ICL mode: number of demonstrations; training mode: number of training samples
@@ -172,7 +179,7 @@ class OurArguments(TrainingArguments):
 
     # MeZO
     zo_eps: float = 1e-3  # eps in MeZO
-    perturbation_mode: str = "two_side"
+    perturbation_mode: str = "one_side"
     q: int = 1  # number of Gaussian samples for zeroth-order trainers
 
     # Prefix tuning
@@ -524,13 +531,13 @@ class Framework:
         self.model.load_state_dict(state_dict)
 
     def get_named_parameters_to_optm(self) -> NamedParametersToOptimize:
-        self.named_parameters_to_optm = NamedParametersToOptimize()
+        named_parameters_to_optm = NamedParametersToOptimize()
         for name in self.names_to_optm:
             param = self.model.state_dict()[name]
         
-            self.named_parameters_to_optm[name] = param
+            named_parameters_to_optm[name] = param
             param.grad = None
-        return self.named_parameters_to_optm
+        return named_parameters_to_optm
     
     def agg_model_parameters(self, local_updates):
         """
@@ -742,21 +749,32 @@ class Framework:
         metrics = {metric_name: calculate_metric(predictions, metric_name)}
         return metrics
 
-    def get_global_eval_samples(self, local_test_sets):
-        # samples = local_test_sets[0].sample_subset(
-        #     data_split="valid", seed=0, num=self.args.num_eval
-        # )
-        samples = []
-        if self.task is None:
-            self.task = local_test_sets[0]
-        for local_dataset in local_test_sets:
-            valid_samples = local_dataset.sample_subset(
-                data_split="valid", seed=0, num=self.args.num_eval
+    def fl_global_eval(self):
+        eval_samples = self.task.sample_subset("valid", seed=0, num=self.args.num_eval)
+        if self.fed_args.global_eval:  
+            metrics = self.evaluate(
+                [], eval_samples, description="Evaluating on the Gloabl Test Set"
             )
-            samples.extend(valid_samples)
-        lens = len(samples)
-        index = np.random.permutation(lens).tolist()[:self.args.num_eval]
-        return [samples[i] for i in index]
+            _keys = list(metrics.keys())
+            for m in _keys:
+                metrics["g_test_" + m] = metrics[m]
+            
+        
+            if self.args.local_rank <= 0:
+                logger.info(metrics)
+                wandb.log(metrics)
+                write_metrics_to_file(
+                    metrics,
+                    (
+                        "result/"
+                        + result_file_tag(self.args)
+                        + f"-fl{round}.json"
+                        if self.fed_args.g_result_file is None
+                        else self.fed_args.g_result_file
+                    ),
+                )
+        if self.args.trainer != "none" and self.args.clean_model_at_end:
+            self.delete_checkpoints()
 
     def train(
         self, train_samples, dev_samples, eval_samples, client_id=-1, current_round=-1
@@ -910,10 +928,6 @@ class Framework:
                         dev_samples = None
                         logger.info("Train samples: %d" % len(train_samples))
                         logger.info("No dev samples")
-
-                    self.args.dev_samples = dev_samples
-                    self.args.eval_samples = eval_samples
-
                     # Training
 
                     self.train(
@@ -974,7 +988,7 @@ class Framework:
             else:
                 eval_samples = self.task.valid_samples
             metrics = self.evaluate(
-                train_sets, eval_samples, one_train_set_per_eval_sample=True
+                train_samples, eval_samples, one_train_set_per_eval_sample=True
             )
             logger.info(metrics)
             wandb.log(metrics)
@@ -988,10 +1002,11 @@ class Framework:
                     ),
                 )
 
-    def weighted_update(self, num_samples,total_samples, client_id):
-        weight = num_samples[client_id]/total_samples
+    def weighted_update(self, weight, client_id):
+        model_state_dict = self.model.state_dict()
         for name in self.names_to_optm:
-            self.model.state_dict()[name].data.mul_(weight)
+            model_state_dict[name] = weight * model_state_dict[name]
+        self.model.load_state_dict(model_state_dict)
 
         
 def result_file_tag(args):
