@@ -798,7 +798,8 @@ class OurTrainer(Trainer):
             if math.isnan(self.projected_grad) or math.isinf(self.projected_grad):
                 self.projected_grad = 0
             else:
-                self.projected_grad = min(self.projected_grad, args.zo_max_grad_norm)
+                if args.zo_max_grad_norm is not None:
+                    self.projected_grad = min(self.projected_grad, args.zo_max_grad_norm)
             # Set the random seed to ensure that we sample the same z for perturbation/update
             torch.manual_seed(self.zo_random_seed)
             for name, param in self.named_parameters_to_optim:

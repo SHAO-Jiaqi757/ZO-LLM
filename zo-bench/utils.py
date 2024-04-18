@@ -113,7 +113,7 @@ class OurArguments(TrainingArguments):
     task_name: str = (
         "SST2"  # task name should match the string before Dataset in the Dataset class name. We support the following task_name: SST2, RTE, CB, BoolQ, WSC, WIC, MultiRC, Copa, ReCoRD, SQuAD, DROP
     )
-    zo_max_grad_norm: float = 1.0  # max grad norm in zeroth-order optimization
+    zo_max_grad_norm: float = None # max grad norm in zeroth-order optimization
     dp_eps: float = 0.1  # epsilon in differential privacy
     
     ## compression related
