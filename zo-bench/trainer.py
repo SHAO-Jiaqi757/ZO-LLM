@@ -130,6 +130,7 @@ class OurTrainer(Trainer):
         self.local_projected_grads = 0
         self.client_id = client_id
         self.current_round = current_round
+        self.global_seed = None
         if self.client_id != -1 and self.current_round != -1: # not fl
             self.base_log = {"client_id": self.client_id, "round": self.current_round}
             self.global_seed = self.current_round
@@ -844,7 +845,7 @@ class OurTrainer(Trainer):
                 # quantization 
                 if self.args.compression is not None: # compress the graident
                     try:
-                        param.grad, residual = eval(f"self.{self.args.compression}(param.grad, self.args.d, self.args.correction)")
+                        param.grad, residual = eval(f"{self.args.compression}(param.grad, self.args.d, self.args.correction)")
                     except AttributeError:
                         raise AttributeError(f"Compression method {self.args.compression} not found.")
                 if residual is not None: # residual correction

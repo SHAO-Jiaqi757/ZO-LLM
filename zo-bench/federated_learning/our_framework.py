@@ -99,7 +99,6 @@ class ourFramework(Framework):
         
     def after_local_train(self, weight):
         # gather the mangnitude of the gradients
-        assert self.client_id == -1
         
         self.local_es_mangnitude_grads += weight * self.local_es_mangnitude_grad
         
