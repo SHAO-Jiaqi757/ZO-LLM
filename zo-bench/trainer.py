@@ -790,23 +790,23 @@ class OurTrainer(Trainer):
             if self.args.perturbation_mode == "one_side":
                 self.zo_perturb_parameters(scaling_factor=-1)
                 loss2 = self.zo_forward(model, inputs)
-                self.projected_grad = ((loss1 - loss2) / self.args.zo_eps).item()
+                # loss1, loss_2 to 32bits
+                self.projected_grad = (((loss1 - loss2).float()) / self.args.zo_eps).item()
             else:  # two side perturbation
                 self.zo_perturb_parameters(scaling_factor=-2)
                 loss2 = self.zo_forward(model, inputs)
-                self.projected_grad = ((loss1 - loss2) / (2 * self.args.zo_eps)).item()
+                self.projected_grad = ((loss1 - loss2).float() / (2 * self.args.zo_eps)).item()
                 # Reset model back to its parameters at start of step
                 self.zo_perturb_parameters(scaling_factor=1)
             
             
-            # clipling the gradient with args.max_grad_norm
-            # if self.projected_grad is overflow in tensor(nan, )
-            if math.isnan(self.projected_grad) or math.isinf(self.projected_grad):
-                self.projected_grad = 0
-            else:
-                if args.zo_max_grad_norm is not None:
-                    self.projected_grad = min(self.projected_grad, args.zo_max_grad_norm)
-            
+            # # clipling the gradient with args.max_grad_norm
+            # # if self.projected_grad is overflow in tensor(nan, )
+            # if math.isnan(self.projected_grad) or math.isinf(self.projected_grad):
+            #     self.projected_grad = 0
+            # else:
+            # logger.info(f"debugging: Projected gradient: {self.projected_grad}")
+
             if self.args.trainer == "zo_fl":
                 self.local_projected_grads += self.projected_grad # accumulate the gradient for the local update
                 
@@ -836,11 +836,13 @@ class OurTrainer(Trainer):
                 residual = None
                 if self.args.compression is not None and self.args.correction:
                     if os.path.exists(os.path.join(self.args.output_dir, f"residual_{self.client_id}_{self.current_round-1}.pt")):
-                        residual = torch.load(os.path.join(self.args.output_dir, f"residual_{self.client_id}_{self.current_round-1}.pt"))
+                        residual = torch.load(os.path.join(self.args.output_dir, f"residual_{self.client_id}_{self.current_round-1}.pt"), map_location=param.data.device)
                         param.grad += residual
                 
                 # gradient normalization (in-place)
-                torch.nn.utils.clip_grad_norm_(param.grad, args.max_grad_norm) # TODO: remove
+                # logger.info(f"debugging: before clipping Gradient norm: {torch.norm(param.grad)}")
+                # torch.nn.utils.clip_grad_norm_(param, args.max_grad_norm) # TODO: remove
+                # logger.info(f"debugging: Gradient norm: {torch.norm(param.grad)}")
                 
                 # quantization 
                 if self.args.compression is not None: # compress the graident
