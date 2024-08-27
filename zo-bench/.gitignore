@@ -2,6 +2,5 @@ result
 tests
 wandb
 models
-sweeps
 logs
 sweeps/classification*

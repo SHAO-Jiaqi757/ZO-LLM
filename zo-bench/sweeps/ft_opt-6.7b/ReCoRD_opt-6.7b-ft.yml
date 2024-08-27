@@ -1,0 +1,43 @@
+name: sgd_ft_meme
+project: ft_opt_6.7B
+command:
+  - ${interpreter}
+  - ${program}
+  - ${args}
+  - "--model_name=facebook/opt-6.7b"
+  - "--task_name=ReCoRD"
+  - "--output_dir=result/opt-6.7b/ReCoRD-ft-$TAG"
+  - "--overwrite_output_dir"
+  - "--num_train_epochs=5"
+  - "--max_steps=5000"
+  - "--load_best_model_at_end"
+  - "--evaluation_strategy=epoch"
+  - "--save_strategy=epoch"
+  - "--save_total_limit=1"
+  - "--logging_steps=10"
+  - "--num_eval=1000"
+  - "--num_train=1000"
+  - "--num_dev=100"
+  - "--train_as_classification"
+  - "--trainer=regular"
+  - "--optimizer=sgd"
+  - "--train_set_seed=0"
+  - "--lr_scheduler_type=constant"
+  - "--eval_steps=500"
+  - "--save_steps=500"
+  - "--load_float16"
+  - "--per_device_train_batch_size=1"
+
+method: grid
+metric:
+  goal: maximize
+  name: test_acc
+parameters:
+  learning_rate:
+    values:
+      - 1e-4
+  weight_decay:
+    values:
+      - 0
+
+program: fl_run.py
