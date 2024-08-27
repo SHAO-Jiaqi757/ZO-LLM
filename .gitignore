@@ -2,7 +2,6 @@ models
 wandb
 __pycache__
 LICENSE
-*.md
 *.txt
 test*
 zo-bench/scripts/*
