@@ -8,8 +8,8 @@ command:
   - "--task_name=ReCoRD"
   - "--output_dir=result/zo/ReCoRD-zo-fl-$TAG"
   - "--overwrite_output_dir"
-  - "--num_train_epochs=3"
-  - "--max_steps=100"
+  - "--num_train_epochs=1"
+  - "--max_steps=1"
   - "--load_best_model_at_end"
   - "--evaluation_strategy=epoch"
   - "--save_strategy=epoch"
@@ -18,7 +18,6 @@ command:
   - "--num_eval=500"
   - "--num_train=10000"
   - "--num_dev=100"
-  - "--train_as_classification"
   - "--trainer=zo_sgd"
   - "--optimizer=sgd"
   - "--compression=qsgd_b"
@@ -31,7 +30,7 @@ command:
   - "--load_float16"
   - "--per_device_train_batch_size=2"
   - "--fed_alg=fedavg"
-  - "--num_rounds=5"
+  - "--num_rounds=500"
   - "--num_clients=5"
   - "--sample_clients=5"
   - "--split_strategy=noniid"
@@ -43,7 +42,7 @@ metric:
 parameters:
   learning_rate:
     values:
-      - 1e-6
+      - 1e-4
 
   weight_decay:
     values:
